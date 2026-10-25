@@ -11,6 +11,8 @@ packages:
     exactVersion: 1.0.0
   VoCore:
     path: Packages/VoCore
+  VoMedia:
+    path: Packages/VoMedia
 
 settings:
   base:
@@ -31,11 +33,19 @@ targets:
     platform: macOS
     sources:
       - path: VoPlayer
+        excludes:
+          - "Resources/Shaders/**"
+      # 着色器作为文件夹整体拷进 Resources/Shaders（不参与编译）
+      - path: VoPlayer/Resources/Shaders
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: MPVKit
         product: MPVKit
       - package: VoCore
         product: VoCore
+      - package: VoMedia
+        product: VoMedia
     info:
       path: VoPlayer/Info.plist
       properties:

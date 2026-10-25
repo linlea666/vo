@@ -126,3 +126,58 @@ final class PixelBufferConversionTests: XCTestCase {
         XCTAssertEqual(back[2], 128 / 255, accuracy: 1e-6)
     }
 }
+
+final class CGImageConversionTests: XCTestCase {
+    func testCGImageRoundTrip() throws {
+        let (w, h) = (4, 3)
+        var pixels = [Float](repeating: 0, count: 3 * w * h)
+        for i in 0..<(w * h) {
+            pixels[i] = Float(i) / 12
+            pixels[w * h + i] = 0.5
+            pixels[2 * w * h + i] = 1 - Float(i) / 12
+        }
+        let image = try XCTUnwrap(PixelBufferConversion.makeCGImage(pixels, width: w, height: h))
+        XCTAssertEqual(image.width, w)
+        XCTAssertEqual(image.height, h)
+        let back = try XCTUnwrap(PixelBufferConversion.planarRGB(from: image))
+        let maxError = zip(back.pixels, pixels).map { abs($0 - $1) }.max() ?? 0
+        XCTAssertLessThanOrEqual(maxError, 0.5 / 255 + 1e-6)
+    }
+
+    func testMakeCGImageRejectsWrongSize() {
+        XCTAssertNil(PixelBufferConversion.makeCGImage([0, 0, 0], width: 2, height: 2))
+    }
+}
+
+final class AIClarityTests: XCTestCase {
+    func testShaderOrder() {
+        XCTAssertEqual(AIClarity.off.shaderFiles, [])
+        XCTAssertEqual(AIClarity(restore: .medium).shaderFiles,
+                       ["Clamp_Highlights.glsl", "Restore_Soft_M.glsl"])
+        XCTAssertEqual(AIClarity(restore: .low, upscale: .high).shaderFiles,
+                       ["Clamp_Highlights.glsl", "Restore_Soft_S.glsl", "Upscale_RealLife_x2_L.glsl"])
+    }
+
+    /// 与打包的着色器文件名对得上
+    func testShaderFilesExistInRepository() throws {
+        let shaders = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("VoPlayer/Resources/Shaders")
+        for level in AIClarity.Level.allCases where level != .off {
+            for file in AIClarity(restore: level, upscale: level).shaderFiles {
+                XCTAssertTrue(FileManager.default.fileExists(atPath: shaders.appendingPathComponent(file).path),
+                              "缺少着色器 \(file)")
+            }
+        }
+    }
+
+    func testOldSettingsWithoutClarityStillDecode() throws {
+        let old = #"{"adjustments":{"brightness":5,"contrast":0,"gamma":30,"saturation":0,"denoise":3,"sharpen":0},"orientation":{"rotation":90,"flipHorizontal":false,"flipVertical":false},"preferEnhanced":false}"#
+        let settings = try JSONDecoder().decode(VideoSettings.self, from: Data(old.utf8))
+        XCTAssertEqual(settings.adjustments.gamma, 30)
+        XCTAssertEqual(settings.orientation.rotation, 90)
+        XCTAssertFalse(settings.preferEnhanced)
+        XCTAssertEqual(settings.clarity, .off)
+    }
+}

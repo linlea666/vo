@@ -26,8 +26,11 @@ jobs:
       - name: Core tests (VoCore)
         run: swift test --package-path Packages/VoCore
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install tools (XcodeGen, ffmpeg for test samples)
+        run: brew install xcodegen ffmpeg
+
+      - name: Media tests (VoMedia, end-to-end export of mp4/mkv/webm/avi/flv)
+        run: swift test --package-path Packages/VoMedia
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -59,6 +62,8 @@ jobs:
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           lipo -archs "$APP/Contents/MacOS/VoPlayer"
+          echo "Bundled shaders:"; ls "$APP/Contents/Resources/Shaders"
+          test -f "$APP/Contents/Resources/Shaders/Upscale_RealLife_x2_M.glsl"
           du -sh "$APP"
 
       - name: Smoke test (launch for a few seconds)

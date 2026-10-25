@@ -10,6 +10,8 @@ struct EnhancePanel: View {
             VStack(alignment: .leading, spacing: 18) {
                 realTimeSection
                 Divider()
+                claritySection
+                Divider()
                 aiSection
                 Divider()
                 orientationSection
@@ -68,6 +70,35 @@ struct EnhancePanel: View {
         }
     }
 
+    // MARK: AI 清晰（实时）
+
+    private var claritySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("AI 清晰（实时）",
+                         subtitle: "Anime4K 神经网络在显卡上实时运行，不改原文件、不用等待。强度越高越耗电，4K 视频建议用“轻”。")
+            levelPicker("去模糊 / 去压缩痕迹", selection: Binding(
+                get: { model.clarity.restore }, set: { model.clarity.restore = $0 }))
+            levelPicker("低分辨率放大（真人权重）", selection: Binding(
+                get: { model.clarity.upscale }, set: { model.clarity.upscale = $0 }))
+            Text("放大只在窗口明显大于视频时生效（例如全屏看 480p / 720p 视频）。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func levelPicker(_ title: String, selection: Binding<AIClarity.Level>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption)
+            Picker("", selection: selection) {
+                ForEach(AIClarity.Level.allCases, id: \.self) { level in
+                    Text(level.title).tag(level)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
+    }
+
     // MARK: 本地 AI
 
     private var aiSection: some View {
@@ -87,14 +118,18 @@ struct EnhancePanel: View {
 
             if let job = model.exportJob {
                 ProgressView(value: job.fraction) {
-                    Text("处理中 \(Int(job.fraction * 100))%").font(.caption)
+                    Text(job.isPaused ? "已暂停 \(Int(job.fraction * 100))%" : "处理中 \(Int(job.fraction * 100))%")
+                        .font(.caption)
                 }
-                Button("取消修复", role: .cancel) { model.cancelExport() }
+                HStack {
+                    Button(job.isPaused ? "继续" : "暂停") { model.togglePauseExport() }
+                    Button("取消修复", role: .cancel) { model.cancelExport() }
+                }
             } else {
                 Button {
-                    model.startLocalAIEnhance()
+                    model.requestLocalAIEnhance()
                 } label: {
-                    Label(model.hasResultForCurrentRecipe ? "播放已修复版本" : "开始 AI 修复并保存",
+                    Label(model.hasResultForCurrentRecipe ? "播放已修复版本" : "预览并开始 AI 修复",
                           systemImage: "wand.and.stars")
                         .frame(maxWidth: .infinity)
                 }
@@ -126,7 +161,7 @@ struct EnhancePanel: View {
                 }
             }
 
-            Text("提示：AI 修复适合昏暗、夜景、逆光的视频；目前支持 mp4 / mov / m4v。其他格式可先用上面的实时修复。")
+            Text("提示：AI 修复适合昏暗、夜景、逆光的视频，支持所有能播放的格式（mp4/mov 保留原音轨，其他格式音频转为 AAC）。会先截当前画面预览效果，满意再处理整段。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }

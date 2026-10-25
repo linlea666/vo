@@ -109,7 +109,7 @@ struct PlayerCommands: Commands {
             Button("恢复原画") { model.applyPreset(.none) }
                 .keyboardShortcut("0", modifiers: [.command, .option])
             Divider()
-            Button("AI 暗光修复并保存") { model.startLocalAIEnhance() }
+            Button("AI 暗光修复（先预览）") { model.requestLocalAIEnhance() }
             Button(model.playingEnhanced ? "切换到原片" : "切换到修复版") {
                 model.setPlayingEnhanced(!model.playingEnhanced)
             }

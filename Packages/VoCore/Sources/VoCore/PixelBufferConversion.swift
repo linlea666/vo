@@ -1,3 +1,4 @@
+import CoreGraphics
 import CoreVideo
 import Foundation
 
@@ -77,5 +78,49 @@ public enum PixelBufferConversion {
         CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
                             attrs as CFDictionary, &buffer)
         return buffer
+    }
+
+    // MARK: - CGImage（预览用）
+
+    /// 把图片转成平面 RGB（0...1）。
+    public static func planarRGB(from image: CGImage) -> (pixels: [Float], width: Int, height: Int)? {
+        let width = image.width, height = image.height
+        guard width > 0, height > 0 else { return nil }
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn: Bool = rgba.withUnsafeMutableBytes { raw in
+            guard let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        let plane = width * height
+        var out = [Float](repeating: 0, count: 3 * plane)
+        let scale: Float = 1 / 255
+        for i in 0..<plane {
+            out[i] = Float(rgba[i * 4]) * scale
+            out[plane + i] = Float(rgba[i * 4 + 1]) * scale
+            out[2 * plane + i] = Float(rgba[i * 4 + 2]) * scale
+        }
+        return (out, width, height)
+    }
+
+    /// 平面 RGB（0...1）转成图片（超出范围的值截断）。
+    public static func makeCGImage(_ pixels: [Float], width: Int, height: Int) -> CGImage? {
+        let plane = width * height
+        guard plane > 0, pixels.count == 3 * plane else { return nil }
+        var rgba = [UInt8](repeating: 255, count: plane * 4)
+        func byte(_ v: Float) -> UInt8 { UInt8(min(max(v * 255 + 0.5, 0), 255)) }
+        for i in 0..<plane {
+            rgba[i * 4] = byte(pixels[i])
+            rgba[i * 4 + 1] = byte(pixels[plane + i])
+            rgba[i * 4 + 2] = byte(pixels[2 * plane + i])
+        }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
     }
 }

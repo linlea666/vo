@@ -60,6 +60,9 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: controlsVisible)
+        .sheet(isPresented: Binding(get: { model.preview != nil }, set: { if !$0 { model.closePreview() } })) {
+            EnhancePreviewSheet(model: model)
+        }
         .navigationTitle(model.sourceURL?.lastPathComponent ?? "Vo Player")
         .onChange(of: model.message) { message in
             guard message != nil else { return }
@@ -114,8 +117,10 @@ private struct EnhancedBanner: View {
         if let job = model.exportJob {
             HStack(spacing: 10) {
                 ProgressView(value: job.fraction).frame(width: 160)
-                Text("AI 修复中 \(Int(job.fraction * 100))%" + remaining(job.remainingSeconds))
+                Text((job.isPaused ? "AI 修复已暂停 " : "AI 修复中 ") + "\(Int(job.fraction * 100))%"
+                     + (job.isPaused ? "" : remaining(job.remainingSeconds)))
                     .font(.callout)
+                Button(job.isPaused ? "继续" : "暂停") { model.togglePauseExport() }
                 Button("取消") { model.cancelExport() }
             }
             .padding(.horizontal, 12).padding(.vertical, 6)

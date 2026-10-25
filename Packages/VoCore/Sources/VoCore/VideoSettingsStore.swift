@@ -6,12 +6,27 @@ public struct VideoSettings: Codable, Equatable, Sendable {
     public var orientation: VideoOrientation
     /// 是否默认播放修复版
     public var preferEnhanced: Bool
+    public var clarity: AIClarity
 
     public init(adjustments: VideoAdjustments = .identity, orientation: VideoOrientation = VideoOrientation(),
-                preferEnhanced: Bool = true) {
+                preferEnhanced: Bool = true, clarity: AIClarity = .off) {
         self.adjustments = adjustments
         self.orientation = orientation
         self.preferEnhanced = preferEnhanced
+        self.clarity = clarity
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case adjustments, orientation, preferEnhanced, clarity
+    }
+
+    /// 字段缺失时用默认值（兼容旧版本保存的设置，新增字段不会让旧数据整个失效）
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        adjustments = try c.decodeIfPresent(VideoAdjustments.self, forKey: .adjustments) ?? .identity
+        orientation = try c.decodeIfPresent(VideoOrientation.self, forKey: .orientation) ?? VideoOrientation()
+        preferEnhanced = try c.decodeIfPresent(Bool.self, forKey: .preferEnhanced) ?? true
+        clarity = try c.decodeIfPresent(AIClarity.self, forKey: .clarity) ?? .off
     }
 
     public static let `default` = VideoSettings()

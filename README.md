@@ -8,7 +8,8 @@
 - **循环**：单个视频循环（⌘L）、A-B 段循环（⌘B：第一次设 A 点，第二次设 B 点，第三次取消）
 - **画面旋转 / 翻转**：顺时针 ⌘R、逆时针 ⌘⇧R、水平/垂直翻转；按视频记住
 - **实时修复**（免费、零等待、不改原文件）：亮度、对比度、伽马（暗部提亮）、饱和度、降噪、锐化，以及“昏暗修复”“强力提亮”等一键预设；按住“对比原画”看效果
-- **AI 暗光修复（本地）**：Zero-DCE++ 模型在本机运行，免费、视频不上传；处理后保存为新的 mp4（HEVC，保留原音轨）
+- **AI 清晰（实时）**：Anime4K 神经网络在显卡上实时运行——“去模糊/去压缩痕迹”和“低分辨率放大”（真人实拍权重），各分 轻/中/强 三档
+- **AI 暗光修复（本地）**：Zero-DCE++ 模型在本机运行，免费、视频不上传；先截当前画面**预览效果**（左右拖动对比、可调强度），满意再处理整段；处理中可**暂停/继续/取消**；所有能播放的格式都能修复，保存为新的 mp4（HEVC；mp4/mov 保留原音轨，其他格式音频转为 AAC）
 - **修复结果缓存**：按视频内容“指纹”识别（改名、移动也认得），同一视频同一参数只处理一次；再次打开自动提示/播放修复版，顶部一键切换 原片 ⇄ 修复版
 - 其他：拖拽打开、最近打开、倍速、逐帧、截图到桌面、全屏
 
@@ -27,8 +28,9 @@
 
 | 方式 | 费用 | 速度 | 适合 |
 | --- | --- | --- | --- |
-| 实时修复 | 免费 | 立即生效 | 稍暗、偏灰、噪点，所有格式 |
-| AI 暗光修复（本地） | 免费 | 预计约为视频时长的 1～3 倍（1080p，待实测） | 很暗的夜景、室内、逆光；目前支持 mp4 / mov / m4v |
+| 实时修复（调色/降噪/锐化） | 免费 | 立即生效 | 稍暗、偏灰、噪点 |
+| AI 清晰（实时） | 免费 | 立即生效（占用显卡） | 模糊、压缩糊、低分辨率 |
+| AI 暗光修复（本地） | 免费 | 预计约为视频时长的 1～3 倍（1080p，待实测） | 很暗的夜景、室内、逆光 |
 
 - AI 修复结果默认保存在 `~/Library/Application Support/VoPlayer/Enhanced/`，也可以在修复面板里选择“保存到原视频旁边”。
 - 偏好设置（⌘,）里可以查看占用空间、删除单个或全部修复版。
@@ -46,12 +48,15 @@ open VoPlayer.xcodeproj
 ```
 
 - `VoPlayer/`：应用（SwiftUI + AppKit）。`Player/` 播放内核封装与状态，`UI/` 界面，`Enhance/` AI 导出。
+- `Packages/VoMedia/`：AI 修复导出（AVFoundation / FFmpeg 读取、HEVC 编码、暂停取消），`swift test --package-path Packages/VoMedia` 会用 ffmpeg 命令行生成 mp4/mkv/webm/avi/flv 样片做端到端测试。
 - `Packages/VoCore/`：与界面无关的核心逻辑（视频指纹、修复缓存、画面参数、Zero-DCE++ 推理），`swift test --package-path Packages/VoCore` 运行测试。
 - `scripts/export_zero_dce.py`：从官方 PyTorch 权重导出模型文件和测试参考数据（无需安装 PyTorch）。
+- `scripts/convert_anime4k.py`：把 WebSR 的真人实拍权重套进 Anime4K 官方着色器模板，生成 `VoPlayer/Resources/Shaders/`（会先用官方动漫权重自检对应关系）。
 - `scripts/make_dmg.sh`：打包 DMG。
 - CI：`.github/workflows/build-dmg.yml` 在 macOS 上测试、编译、打包；推送 `v*` 标签时自动发布 Release。
 
 ## 许可与致谢
 
 - 播放内核：[mpv](https://mpv.io) / [MPVKit](https://github.com/mpvkit/MPVKit)（LGPL 版本）、FFmpeg。
-- AI 模型：Zero-DCE++（Li, Guo, Loy, *Learning to Enhance Low-Light Image via Zero-Reference Deep Curve Estimation*, TPAMI 2021），权重来自 [Li-Chongyi/Zero-DCE_extension](https://github.com/Li-Chongyi/Zero-DCE_extension)。原仓库未声明开源许可，仅供个人学习使用。
+- AI 清晰：[Anime4K](https://github.com/bloc97/Anime4K)（MIT，© bloc97）着色器；真人实拍权重来自 [WebSR](https://github.com/sb2702/websr)（MIT，© Sam Bhattacharyya），思路参考 [free-ai-video-upscaler](https://github.com/sb2702/free-ai-video-upscaler)。
+- AI 暗光模型：Zero-DCE++（Li, Guo, Loy, *Learning to Enhance Low-Light Image via Zero-Reference Deep Curve Estimation*, TPAMI 2021），权重来自 [Li-Chongyi/Zero-DCE_extension](https://github.com/Li-Chongyi/Zero-DCE_extension)。原仓库未声明开源许可，仅供个人学习使用。
