@@ -196,7 +196,7 @@ final class VideoAdjustmentsTests: XCTestCase {
         var o = VideoOrientation()
         o.rotateCounterClockwise()
         XCTAssertEqual(o.rotation, 270)
-        for _ in 0..<5 { o.rotateClockwise() }
+        for _ in 0..<3 { o.rotateClockwise() }  // 270 + 3×90 = 540 ≡ 180
         XCTAssertEqual(o.rotation, 180)
         XCTAssertEqual(VideoOrientation(rotation: 450).rotation, 90)
         XCTAssertEqual(VideoOrientation(rotation: -90).rotation, 270)
