@@ -26,12 +26,8 @@ jobs:
       - name: Core tests (VoCore)
         run: swift test --package-path Packages/VoCore
 
-      - name: Install tools (XcodeGen, ffmpeg for test samples)
-        run: brew install xcodegen ffmpeg
-
-      - name: Media tests (VoMedia, end-to-end export of mp4/mkv/webm/avi/flv)
-        timeout-minutes: 15
-        run: swift test --package-path Packages/VoMedia 2>&1 | tee media-tests.log; exit ${PIPESTATUS[0]}
+      - name: Install XcodeGen
+        run: brew install xcodegen
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -92,13 +88,26 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
-          path: |
-            build/xcodebuild.log
-            media-tests.log
+          name: xcodebuild-log
+          path: build/xcodebuild.log
 
       - name: Publish release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.dmg
+
+  # 端到端导出测试单独一个任务：与打包并行，失败时整轮显示红色，但不阻塞 DMG 产出
+  media-tests:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg (for generating test samples)
+        run: brew install ffmpeg
+
+      - name: Media tests (VoMedia, end-to-end export of mp4/mkv/webm/avi/flv)
+        timeout-minutes: 20
+        run: swift test --package-path Packages/VoMedia
+

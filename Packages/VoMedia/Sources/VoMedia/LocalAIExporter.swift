@@ -10,11 +10,13 @@ import VoCore
 public final class LocalAIExporter: @unchecked Sendable {
     public enum ExportError: LocalizedError {
         case writerFailed(String)
+        case encoderStalled
         case cancelled
 
         public var errorDescription: String? {
             switch self {
             case .writerFailed(let detail): return "写入修复后的视频失败：\(detail)"
+            case .encoderStalled: return "视频编码器长时间无响应，已停止。请重试，或重启电脑后再试。"
             case .cancelled: return "已取消。"
             }
         }
@@ -27,6 +29,9 @@ public final class LocalAIExporter: @unchecked Sendable {
         public var remainingSeconds: Double?
         public var isPaused: Bool
     }
+
+    /// 多久没有写出新画面就判定编码器卡住（暂停时不计）
+    public var stallTimeout: TimeInterval = 30
 
     private let model: ZeroDCE
     private let strength: Float
@@ -156,7 +161,11 @@ public final class LocalAIExporter: @unchecked Sendable {
         group.enter()
         videoInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
             while videoInput.isReadyForMoreMediaData {
-                state.pausedSeconds += waitWhilePaused()
+                let paused = waitWhilePaused()
+                if paused > 0 {
+                    state.pausedSeconds += paused
+                    state.touch()
+                }
                 if isCancelled || state.error != nil {
                     finish(videoInput, state: state, group: group)
                     return
@@ -177,6 +186,7 @@ public final class LocalAIExporter: @unchecked Sendable {
                     return
                 }
                 state.framesDone += 1
+                state.touch()
                 if state.framesDone % 5 == 0 {
                     let fraction = min(Double(state.framesDone) / Double(totalFrames), 0.999)
                     let elapsed = Date().timeIntervalSince(state.started) - state.pausedSeconds
@@ -220,9 +230,17 @@ public final class LocalAIExporter: @unchecked Sendable {
         // 看门狗：写入端一旦失败就不会再回调，主动结束两路，避免永远等待
         let watchdog = DispatchSource.makeTimerSource(queue: .global())
         watchdog.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        let stallTimeout = self.stallTimeout
         watchdog.setEventHandler { [self] in
-            guard writer.status == .failed || writer.status == .cancelled else { return }
-            let failure = ExportError.writerFailed(writer.error?.localizedDescription ?? "写入中断")
+            let failure: ExportError
+            if writer.status == .failed || writer.status == .cancelled {
+                failure = .writerFailed(writer.error?.localizedDescription ?? "写入中断")
+            } else if !isPaused, !state.isFinished, state.secondsSinceProgress > stallTimeout {
+                // 编码器卡住时不会报错，只是不再要数据（例如没有硬件编码/缩放器的虚拟机）
+                failure = .encoderStalled
+            } else {
+                return
+            }
             finish(videoInput, state: state, group: group, error: failure)
             if let audioInput { finish(audioInput, state: audioState, group: group, error: failure) }
         }
@@ -267,8 +285,23 @@ public final class LocalAIExporter: @unchecked Sendable {
         var pausedSeconds: TimeInterval = 0
         var error: Error?
         private var finished = false
+        private var lastProgress = Date()
         private let lock = NSLock()
         init(started: Date) { self.started = started }
+
+        func touch() {
+            lock.lock(); lastProgress = Date(); lock.unlock()
+        }
+
+        var secondsSinceProgress: TimeInterval {
+            lock.lock(); defer { lock.unlock() }
+            return Date().timeIntervalSince(lastProgress)
+        }
+
+        var isFinished: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return finished
+        }
 
         /// 只有第一次调用返回 true
         func markFinished(error: Error?) -> Bool {
