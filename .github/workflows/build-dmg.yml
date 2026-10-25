@@ -109,5 +109,6 @@ jobs:
 
       - name: Media tests (VoMedia, end-to-end export of mp4/mkv/webm/avi/flv)
         timeout-minutes: 20
-        run: swift test --package-path Packages/VoMedia
+        # 用优化编译：调试版下 Zero-DCE++ 的卷积循环慢几十倍（每帧约 1.5 秒）
+        run: swift test -c release -Xswiftc -enable-testing --package-path Packages/VoMedia
 
