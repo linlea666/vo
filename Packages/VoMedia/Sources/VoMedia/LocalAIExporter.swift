@@ -213,8 +213,6 @@ public final class LocalAIExporter: @unchecked Sendable {
         var framesDone = 0
         var videoDone = false
         var audioDone = job.audioInput == nil
-        var lastVideoTime = 0.0
-        var lastAudioTime = 0.0
         let started = Date()
         var pausedSeconds: TimeInterval = 0
         var lastProgress = Date()
@@ -240,7 +238,6 @@ public final class LocalAIExporter: @unchecked Sendable {
                                     smoother: &smoother, writer: job.writer)
                     }
                     framesDone += 1
-                    lastVideoTime = frame.time.seconds
                     if framesDone == 1 { debugLog?("first frame written") }
                     if framesDone % 5 == 0 {
                         let fraction = min(Double(framesDone) / Double(job.totalFrames), 0.999)
@@ -257,18 +254,15 @@ public final class LocalAIExporter: @unchecked Sendable {
                 didWork = true
             }
 
-            // 音频：最多领先视频 1 秒，避免一路写太多而让写入端等待另一路
-            if !audioDone, let audioInput = job.audioInput, audioInput.isReadyForMoreMediaData,
-               videoDone || lastAudioTime <= lastVideoTime + 1 {
+            // 音频：写入端要就给。交错节奏由 isReadyForMoreMediaData 决定，不能自己再加限制——
+            // AVFoundation 原样复制的音频一块可能就有几秒，额外限制会和写入端互相等待
+            if !audioDone, let audioInput = job.audioInput, audioInput.isReadyForMoreMediaData {
                 do {
                     if let sample = try job.source.nextAudioSample() {
                         guard audioInput.append(sample) else {
                             throw ExportError.writerFailed(
                                 "写入音频失败：\(job.writer.error?.localizedDescription ?? "")")
                         }
-                        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                        let duration = CMSampleBufferGetDuration(sample)
-                        lastAudioTime = (duration.isValid ? CMTimeAdd(pts, duration) : pts).seconds
                     } else {
                         audioInput.markAsFinished()
                         audioDone = true
