@@ -168,11 +168,13 @@ public final class LocalAIExporter: @unchecked Sendable {
                     }
                     try autoreleasepool {
                         try process(frame.buffer, time: frame.time, adaptor: adaptor, factor: factor,
-                                    smoother: &state.smoother)
+                                    smoother: &state.smoother, writer: writer)
                     }
                 } catch {
+                    // 出错立即结束：写入端失败后不会再回调，不能等下一轮
                     state.error = error
-                    continue
+                    finish(videoInput, state: state, group: group)
+                    return
                 }
                 state.framesDone += 1
                 if state.framesDone % 5 == 0 {
@@ -185,8 +187,8 @@ public final class LocalAIExporter: @unchecked Sendable {
             }
         }
 
+        let audioState = FrameState(started: Date())
         if let audioInput {
-            let audioState = FrameState(started: Date())
             group.enter()
             audioInput.requestMediaDataWhenReady(on: audioQueue) { [self] in
                 while audioInput.isReadyForMoreMediaData {
@@ -199,25 +201,47 @@ public final class LocalAIExporter: @unchecked Sendable {
                             finish(audioInput, state: audioState, group: group)
                             return
                         }
-                        audioInput.append(sample)
+                        if !audioInput.append(sample) {
+                            audioState.error = ExportError.writerFailed(
+                                "写入音频失败：\(writer.error?.localizedDescription ?? "")")
+                            finish(audioInput, state: audioState, group: group)
+                            return
+                        }
                     } catch {
-                        // 音频出错不影响画面：放弃剩余音频
+                        // 音频解码出错不影响画面：放弃剩余音频
                         audioState.error = error
+                        finish(audioInput, state: audioState, group: group)
+                        return
                     }
                 }
             }
         }
 
+        // 看门狗：写入端一旦失败就不会再回调，主动结束两路，避免永远等待
+        let watchdog = DispatchSource.makeTimerSource(queue: .global())
+        watchdog.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        watchdog.setEventHandler { [self] in
+            guard writer.status == .failed || writer.status == .cancelled else { return }
+            let failure = ExportError.writerFailed(writer.error?.localizedDescription ?? "写入中断")
+            finish(videoInput, state: state, group: group, error: failure)
+            if let audioInput { finish(audioInput, state: audioState, group: group, error: failure) }
+        }
+        watchdog.resume()
+
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             group.notify(queue: .global()) { continuation.resume() }
         }
+        watchdog.cancel()
 
-        if isCancelled || state.error != nil {
+        if state.error == nil, let audioError = audioState.error, writer.status == .failed {
+            state.error = audioError
+        }
+        if isCancelled || state.error != nil || writer.status == .failed {
             source.cancel()
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: tempURL)
             if isCancelled { throw ExportError.cancelled }
-            throw state.error!
+            throw state.error ?? ExportError.writerFailed(writer.error?.localizedDescription ?? "未知错误")
         }
 
         await writer.finishWriting()
@@ -235,26 +259,35 @@ public final class LocalAIExporter: @unchecked Sendable {
         progress(Progress(fraction: 1, framesDone: state.framesDone, remainingSeconds: 0, isPaused: false))
     }
 
-    /// 回调在后台队列执行，可变状态放进引用类型（每个实例只在一个队列上写）
+    /// 回调在后台队列执行，可变状态放进引用类型（处理数据只在各自队列上写；结束标记加锁，看门狗也会调用）
     private final class FrameState: @unchecked Sendable {
         let started: Date
         var smoother = CurveSmoother()
         var framesDone = 0
         var pausedSeconds: TimeInterval = 0
         var error: Error?
-        var finished = false
+        private var finished = false
+        private let lock = NSLock()
         init(started: Date) { self.started = started }
+
+        /// 只有第一次调用返回 true
+        func markFinished(error: Error?) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !finished else { return false }
+            finished = true
+            if let error, self.error == nil { self.error = error }
+            return true
+        }
     }
 
-    private func finish(_ input: AVAssetWriterInput, state: FrameState, group: DispatchGroup) {
-        guard !state.finished else { return }
-        state.finished = true
+    private func finish(_ input: AVAssetWriterInput, state: FrameState, group: DispatchGroup, error: Error? = nil) {
+        guard state.markFinished(error: error) else { return }
         input.markAsFinished()
         group.leave()
     }
 
     private func process(_ source: CVPixelBuffer, time: CMTime, adaptor: AVAssetWriterInputPixelBufferAdaptor,
-                         factor: Int, smoother: inout CurveSmoother) throws {
+                         factor: Int, smoother: inout CurveSmoother, writer: AVAssetWriter) throws {
         let converted = try PixelBufferConversion.planarRGB(from: source)
         var pixels = converted.pixels
         let width = converted.width, height = converted.height
@@ -270,7 +303,7 @@ public final class LocalAIExporter: @unchecked Sendable {
         }
         try PixelBufferConversion.write(pixels, width: width, height: height, to: output)
         guard adaptor.append(output, withPresentationTime: time) else {
-            throw ExportError.writerFailed("写入画面失败")
+            throw ExportError.writerFailed("写入画面失败：\(writer.error?.localizedDescription ?? "")")
         }
     }
 }

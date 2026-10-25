@@ -30,7 +30,8 @@ jobs:
         run: brew install xcodegen ffmpeg
 
       - name: Media tests (VoMedia, end-to-end export of mp4/mkv/webm/avi/flv)
-        run: swift test --package-path Packages/VoMedia
+        timeout-minutes: 20
+        run: swift test --package-path Packages/VoMedia 2>&1 | tee media-tests.log; exit ${PIPESTATUS[0]}
 
       - name: Generate Xcode project
         run: xcodegen generate
@@ -91,8 +92,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: xcodebuild-log
-          path: build/xcodebuild.log
+          name: logs
+          path: |
+            build/xcodebuild.log
+            media-tests.log
 
       - name: Publish release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
