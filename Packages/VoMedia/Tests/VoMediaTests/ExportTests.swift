@@ -10,6 +10,7 @@ final class ExportTests: XCTestCase {
 
     override class func setUp() {
         super.setUp()
+        setvbuf(stdout, nil, _IONBF, 0)   // 不缓冲输出：万一卡住，CI 日志里也能看到进行到哪一步
         workDir = FileManager.default.temporaryDirectory.appendingPathComponent("vo-media-tests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
         let candidates = [ProcessInfo.processInfo.environment["FFMPEG_PATH"],
@@ -22,6 +23,49 @@ final class ExportTests: XCTestCase {
         super.tearDown()
     }
 
+    static func log(_ text: String) {
+        print("[\(String(format: "%.1f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000)))] \(text)")
+    }
+
+    struct TimeoutError: LocalizedError {
+        let what: String
+        var errorDescription: String? { "超时：\(what)" }
+    }
+
+    private final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if done { return false }
+            done = true
+            return true
+        }
+    }
+
+    /// 限时执行：超时直接判失败。用非结构化任务，卡住的任务不会拖住测试本身。
+    private func withTimeout<T: Sendable>(_ seconds: Double, _ what: String,
+                                          _ body: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            let once = Once()
+            Task {
+                do {
+                    let value = try await body()
+                    if once.claim() { continuation.resume(returning: value) }
+                } catch {
+                    if once.claim() { continuation.resume(throwing: error) }
+                }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if once.claim() {
+                    Self.log("TIMEOUT: \(what)")
+                    continuation.resume(throwing: TimeoutError(what: what))
+                }
+            }
+        }
+    }
+
     /// 生成样片：320×180、25fps、2 秒、偏暗的测试图 + 440Hz 正弦音
     private func makeSample(_ name: String, video: [String], audio: [String]) throws -> URL {
         guard let ffmpeg = Self.ffmpeg else { throw XCTSkip("没有找到 ffmpeg，跳过端到端导出测试") }
@@ -29,15 +73,25 @@ final class ExportTests: XCTestCase {
         if FileManager.default.fileExists(atPath: url.path) { return url }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpeg)
-        process.arguments = ["-y", "-loglevel", "error",
+        process.arguments = ["-nostdin", "-y", "-loglevel", "error",
                              "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=2,eq=brightness=-0.35",
                              "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2",
                              "-shortest"] + video + audio + [url.path]
-        let pipe = Pipe()
-        process.standardError = pipe
+        let errorFile = Self.workDir.appendingPathComponent("\(name).ffmpeg.log")
+        FileManager.default.createFile(atPath: errorFile.path, contents: nil)
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = try FileHandle(forWritingTo: errorFile)
+        Self.log("ffmpeg -> \(name)")
         try process.run()
-        process.waitUntilExit()
-        let log = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let deadline = Date().addingTimeInterval(60)
+        while process.isRunning && Date() < deadline { usleep(50_000) }
+        if process.isRunning {
+            process.terminate()
+            throw XCTSkip("ffmpeg 生成 \(name) 超时")
+        }
+        let log = (try? String(contentsOf: errorFile, encoding: .utf8)) ?? ""
+        Self.log("ffmpeg done \(name) status \(process.terminationStatus)")
         guard process.terminationStatus == 0 else {
             throw XCTSkip("ffmpeg 生成 \(name) 失败（可能缺少编码器）：\(log)")
         }
@@ -53,10 +107,17 @@ final class ExportTests: XCTestCase {
     }
 
     private func exportAndCheck(_ input: URL, file: StaticString = #filePath, line: UInt = #line) async throws -> Checked {
-        let source = try await ExportSourceFactory.open(input)
+        Self.log("open \(input.lastPathComponent)")
+        let source = try await withTimeout(30, "打开 \(input.lastPathComponent)") {
+            try await ExportSourceFactory.open(input)
+        }
+        Self.log("export \(input.lastPathComponent) via \(source.readerName)")
         let output = Self.workDir.appendingPathComponent("out-\(UUID().uuidString).mp4")
         let exporter = try LocalAIExporter(strength: 0.8)
-        try await exporter.export(from: source, destination: output) { _ in }
+        try await withTimeout(90, "导出 \(input.lastPathComponent)") {
+            try await exporter.export(from: source, destination: output) { _ in }
+        }
+        Self.log("export done \(input.lastPathComponent)")
 
         let asset = AVURLAsset(url: output)
         let video = try await asset.loadTracks(withMediaType: .video)
@@ -143,7 +204,9 @@ final class ExportTests: XCTestCase {
     func testOutputIsBrighterThanDarkInput() async throws {
         let input = try makeSample("in.mp4", video: ["-c:v", "libx264", "-pix_fmt", "yuv420p"], audio: ["-c:a", "aac"])
         let output = Self.workDir.appendingPathComponent("bright-\(UUID().uuidString).mp4")
-        try await LocalAIExporter(strength: 1).export(source: input, destination: output) { _ in }
+        try await withTimeout(90, "导出（亮度检查）") {
+            try await LocalAIExporter(strength: 1).export(source: input, destination: output) { _ in }
+        }
         let before = try await meanLuma(input)
         let after = try await meanLuma(output)
         XCTAssertGreaterThan(after, before + 0.05, "暗光修复后应明显变亮（前 \(before)，后 \(after)）")
@@ -155,7 +218,9 @@ final class ExportTests: XCTestCase {
         let exporter = try LocalAIExporter(strength: 1)
         exporter.cancel()
         do {
-            try await exporter.export(source: input, destination: output) { _ in }
+            try await withTimeout(60, "取消") {
+                try await exporter.export(source: input, destination: output) { _ in }
+            }
             XCTFail("取消后不应成功")
         } catch LocalAIExporter.ExportError.cancelled {
         }
@@ -173,7 +238,9 @@ final class ExportTests: XCTestCase {
             exporter.resume()
         }
         let started = Date()
-        try await exporter.export(source: input, destination: output) { _ in }
+        try await withTimeout(90, "暂停后继续") {
+            try await exporter.export(source: input, destination: output) { _ in }
+        }
         XCTAssertGreaterThan(Date().timeIntervalSince(started), 0.45, "暂停期间不应继续处理")
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
     }
