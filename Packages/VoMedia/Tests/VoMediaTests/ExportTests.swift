@@ -114,6 +114,7 @@ final class ExportTests: XCTestCase {
         Self.log("export \(input.lastPathComponent) via \(source.readerName)")
         let output = Self.workDir.appendingPathComponent("out-\(UUID().uuidString).mp4")
         let exporter = try LocalAIExporter(strength: 0.8)
+        exporter.debugLog = { Self.log("  exporter: \($0)") }
         try await withTimeout(90, "导出 \(input.lastPathComponent)") {
             try await exporter.export(from: source, destination: output) { _ in }
         }

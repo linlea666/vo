@@ -148,120 +148,35 @@ public final class LocalAIExporter: @unchecked Sendable {
             throw ExportError.writerFailed(writer.error?.localizedDescription ?? "")
         }
         writer.startSession(atSourceTime: .zero)
+        debugLog?("writer started \(width)x\(height) via \(source.readerName)")
 
-        let factor = ZeroDCE.downsampleFactor(width: width, height: height)
-        let totalFrames = max(1, Int(source.duration * source.frameRate))
-        let state = FrameState(started: Date())
-
-        let group = DispatchGroup()
-        let videoQueue = DispatchQueue(label: "vo.export.video", qos: .userInitiated)
-        let audioQueue = DispatchQueue(label: "vo.export.audio", qos: .userInitiated)
-
-        // 视频与音频各自在 ready 时写入，避免 AVAssetWriter 等待交错时互相卡死
-        group.enter()
-        videoInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
-            while videoInput.isReadyForMoreMediaData {
-                let paused = waitWhilePaused()
-                if paused > 0 {
-                    state.pausedSeconds += paused
-                    state.touch()
-                }
-                if isCancelled || state.error != nil {
-                    finish(videoInput, state: state, group: group)
-                    return
-                }
-                do {
-                    guard let frame = try source.nextVideoFrame() else {
-                        finish(videoInput, state: state, group: group)
-                        return
-                    }
-                    try autoreleasepool {
-                        try process(frame.buffer, time: frame.time, adaptor: adaptor, factor: factor,
-                                    smoother: &state.smoother, writer: writer)
-                    }
-                } catch {
-                    // 出错立即结束：写入端失败后不会再回调，不能等下一轮
-                    state.error = error
-                    finish(videoInput, state: state, group: group)
-                    return
-                }
-                state.framesDone += 1
-                state.touch()
-                if state.framesDone % 5 == 0 {
-                    let fraction = min(Double(state.framesDone) / Double(totalFrames), 0.999)
-                    let elapsed = Date().timeIntervalSince(state.started) - state.pausedSeconds
-                    let remaining = fraction > 0.01 ? elapsed / fraction * (1 - fraction) : nil
-                    progress(Progress(fraction: fraction, framesDone: state.framesDone,
-                                      remainingSeconds: remaining, isPaused: false))
-                }
+        // 单独一个工作线程：按时间戳交替写视频和音频，轮询 isReadyForMoreMediaData。
+        // 不用 requestMediaDataWhenReady 的跨队列回调——那种写法在写入端停止回调时无法收尾。
+        let job = WriteJob(source: source, writer: writer, videoInput: videoInput, audioInput: audioInput,
+                           adaptor: adaptor, factor: ZeroDCE.downsampleFactor(width: width, height: height),
+                           totalFrames: max(1, Int(source.duration * source.frameRate)), progress: progress)
+        let outcome: Result<Int, Error> = await withCheckedContinuation { continuation in
+            let thread = Thread { [self] in
+                continuation.resume(returning: Result { try runWriteLoop(job) })
             }
+            thread.name = "vo.export"
+            thread.qualityOfService = .userInitiated
+            thread.start()
         }
 
-        let audioState = FrameState(started: Date())
-        if let audioInput {
-            group.enter()
-            audioInput.requestMediaDataWhenReady(on: audioQueue) { [self] in
-                while audioInput.isReadyForMoreMediaData {
-                    if isCancelled || state.error != nil || audioState.error != nil {
-                        finish(audioInput, state: audioState, group: group)
-                        return
-                    }
-                    do {
-                        guard let sample = try source.nextAudioSample() else {
-                            finish(audioInput, state: audioState, group: group)
-                            return
-                        }
-                        if !audioInput.append(sample) {
-                            audioState.error = ExportError.writerFailed(
-                                "写入音频失败：\(writer.error?.localizedDescription ?? "")")
-                            finish(audioInput, state: audioState, group: group)
-                            return
-                        }
-                    } catch {
-                        // 音频解码出错不影响画面：放弃剩余音频
-                        audioState.error = error
-                        finish(audioInput, state: audioState, group: group)
-                        return
-                    }
-                }
-            }
-        }
-
-        // 看门狗：写入端一旦失败就不会再回调，主动结束两路，避免永远等待
-        let watchdog = DispatchSource.makeTimerSource(queue: .global())
-        watchdog.schedule(deadline: .now() + 0.5, repeating: 0.5)
-        let stallTimeout = self.stallTimeout
-        watchdog.setEventHandler { [self] in
-            let failure: ExportError
-            if writer.status == .failed || writer.status == .cancelled {
-                failure = .writerFailed(writer.error?.localizedDescription ?? "写入中断")
-            } else if !isPaused, !state.isFinished, state.secondsSinceProgress > stallTimeout {
-                // 编码器卡住时不会报错，只是不再要数据（例如没有硬件编码/缩放器的虚拟机）
-                failure = .encoderStalled
-            } else {
-                return
-            }
-            finish(videoInput, state: state, group: group, error: failure)
-            if let audioInput { finish(audioInput, state: audioState, group: group, error: failure) }
-        }
-        watchdog.resume()
-
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            group.notify(queue: .global()) { continuation.resume() }
-        }
-        watchdog.cancel()
-
-        if state.error == nil, let audioError = audioState.error, writer.status == .failed {
-            state.error = audioError
-        }
-        if isCancelled || state.error != nil || writer.status == .failed {
+        let framesDone: Int
+        switch outcome {
+        case .success(let frames):
+            framesDone = frames
+        case .failure(let error):
+            debugLog?("write loop failed: \(error)")
             source.cancel()
-            writer.cancelWriting()
+            if writer.status == .writing { writer.cancelWriting() }
             try? FileManager.default.removeItem(at: tempURL)
-            if isCancelled { throw ExportError.cancelled }
-            throw state.error ?? ExportError.writerFailed(writer.error?.localizedDescription ?? "未知错误")
+            throw error
         }
 
+        debugLog?("finishing (\(framesDone) frames)")
         await writer.finishWriting()
         guard writer.status == .completed else {
             try? FileManager.default.removeItem(at: tempURL)
@@ -274,49 +189,112 @@ public final class LocalAIExporter: @unchecked Sendable {
             try FileManager.default.removeItem(at: destination)
         }
         try FileManager.default.moveItem(at: tempURL, to: destination)
-        progress(Progress(fraction: 1, framesDone: state.framesDone, remainingSeconds: 0, isPaused: false))
+        debugLog?("done")
+        progress(Progress(fraction: 1, framesDone: framesDone, remainingSeconds: 0, isPaused: false))
     }
 
-    /// 回调在后台队列执行，可变状态放进引用类型（处理数据只在各自队列上写；结束标记加锁，看门狗也会调用）
-    private final class FrameState: @unchecked Sendable {
-        let started: Date
+    /// 调试日志（测试里打开，便于在 CI 上定位问题）
+    public var debugLog: ((String) -> Void)?
+
+    private struct WriteJob {
+        let source: ExportSource
+        let writer: AVAssetWriter
+        let videoInput: AVAssetWriterInput
+        let audioInput: AVAssetWriterInput?
+        let adaptor: AVAssetWriterInputPixelBufferAdaptor
+        let factor: Int
+        let totalFrames: Int
+        let progress: @Sendable (Progress) -> Void
+    }
+
+    /// 写入主循环，返回写出的帧数。
+    private func runWriteLoop(_ job: WriteJob) throws -> Int {
         var smoother = CurveSmoother()
         var framesDone = 0
+        var videoDone = false
+        var audioDone = job.audioInput == nil
+        var lastVideoTime = 0.0
+        var lastAudioTime = 0.0
+        let started = Date()
         var pausedSeconds: TimeInterval = 0
-        var error: Error?
-        private var finished = false
-        private var lastProgress = Date()
-        private let lock = NSLock()
-        init(started: Date) { self.started = started }
+        var lastProgress = Date()
 
-        func touch() {
-            lock.lock(); lastProgress = Date(); lock.unlock()
+        while !(videoDone && audioDone) {
+            let paused = waitWhilePaused()
+            if paused > 0 {
+                pausedSeconds += paused
+                lastProgress = Date()
+            }
+            if isCancelled { throw ExportError.cancelled }
+            if job.writer.status == .failed {
+                throw ExportError.writerFailed(job.writer.error?.localizedDescription ?? "写入中断")
+            }
+
+            var didWork = false
+
+            // 视频：处理一帧
+            if !videoDone, job.videoInput.isReadyForMoreMediaData {
+                if let frame = try job.source.nextVideoFrame() {
+                    try autoreleasepool {
+                        try process(frame.buffer, time: frame.time, adaptor: job.adaptor, factor: job.factor,
+                                    smoother: &smoother, writer: job.writer)
+                    }
+                    framesDone += 1
+                    lastVideoTime = frame.time.seconds
+                    if framesDone == 1 { debugLog?("first frame written") }
+                    if framesDone % 5 == 0 {
+                        let fraction = min(Double(framesDone) / Double(job.totalFrames), 0.999)
+                        let elapsed = Date().timeIntervalSince(started) - pausedSeconds
+                        let remaining = fraction > 0.01 ? elapsed / fraction * (1 - fraction) : nil
+                        job.progress(Progress(fraction: fraction, framesDone: framesDone,
+                                              remainingSeconds: remaining, isPaused: false))
+                    }
+                } else {
+                    job.videoInput.markAsFinished()
+                    videoDone = true
+                    debugLog?("video finished (\(framesDone) frames)")
+                }
+                didWork = true
+            }
+
+            // 音频：最多领先视频 1 秒，避免一路写太多而让写入端等待另一路
+            if !audioDone, let audioInput = job.audioInput, audioInput.isReadyForMoreMediaData,
+               videoDone || lastAudioTime <= lastVideoTime + 1 {
+                do {
+                    if let sample = try job.source.nextAudioSample() {
+                        guard audioInput.append(sample) else {
+                            throw ExportError.writerFailed(
+                                "写入音频失败：\(job.writer.error?.localizedDescription ?? "")")
+                        }
+                        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                        let duration = CMSampleBufferGetDuration(sample)
+                        lastAudioTime = (duration.isValid ? CMTimeAdd(pts, duration) : pts).seconds
+                    } else {
+                        audioInput.markAsFinished()
+                        audioDone = true
+                        debugLog?("audio finished")
+                    }
+                } catch let error as ExportError {
+                    throw error
+                } catch {
+                    // 音频解码出错不影响画面：放弃剩余音频
+                    debugLog?("audio decode error, dropping audio: \(error)")
+                    audioInput.markAsFinished()
+                    audioDone = true
+                }
+                didWork = true
+            }
+
+            if didWork { lastProgress = Date() }
+            if !didWork {
+                if Date().timeIntervalSince(lastProgress) > stallTimeout {
+                    debugLog?("stalled: videoReady=\(job.videoInput.isReadyForMoreMediaData) audioReady=\(job.audioInput?.isReadyForMoreMediaData ?? false) status=\(job.writer.status.rawValue)")
+                    throw ExportError.encoderStalled
+                }
+                usleep(2_000)
+            }
         }
-
-        var secondsSinceProgress: TimeInterval {
-            lock.lock(); defer { lock.unlock() }
-            return Date().timeIntervalSince(lastProgress)
-        }
-
-        var isFinished: Bool {
-            lock.lock(); defer { lock.unlock() }
-            return finished
-        }
-
-        /// 只有第一次调用返回 true
-        func markFinished(error: Error?) -> Bool {
-            lock.lock(); defer { lock.unlock() }
-            guard !finished else { return false }
-            finished = true
-            if let error, self.error == nil { self.error = error }
-            return true
-        }
-    }
-
-    private func finish(_ input: AVAssetWriterInput, state: FrameState, group: DispatchGroup, error: Error? = nil) {
-        guard state.markFinished(error: error) else { return }
-        input.markAsFinished()
-        group.leave()
+        return framesDone
     }
 
     private func process(_ source: CVPixelBuffer, time: CMTime, adaptor: AVAssetWriterInputPixelBufferAdaptor,
