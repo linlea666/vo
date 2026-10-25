@@ -1,0 +1,12 @@
+# Xcode / XcodeGen 生成物（项目由 project.yml 生成）
+*.xcodeproj/
+build/
+dist/
+DerivedData/
+.build/
+.swiftpm/
+xcuserdata/
+*.dmg
+.DS_Store
+__pycache__/
+VoPlayer/Info.plist

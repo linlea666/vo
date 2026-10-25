@@ -1,0 +1,91 @@
+name: VoPlayer
+options:
+  bundleIdPrefix: com.linlea
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+packages:
+  MPVKit:
+    url: https://github.com/mpvkit/MPVKit
+    exactVersion: 1.0.0
+  VoCore:
+    path: Packages/VoCore
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
+    # 没有开发者账号：本地临时签名（Apple 芯片要求至少有临时签名才能运行）
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+
+targets:
+  VoPlayer:
+    type: application
+    platform: macOS
+    sources:
+      - path: VoPlayer
+    dependencies:
+      - package: MPVKit
+        product: MPVKit
+      - package: VoCore
+        product: VoCore
+    info:
+      path: VoPlayer/Info.plist
+      properties:
+        CFBundleDisplayName: Vo Player
+        CFBundleName: Vo Player
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.video
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHumanReadableCopyright: ""
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Video
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.movie
+              - public.audiovisual-content
+              - public.avi
+              - public.mpeg-4
+              - com.apple.quicktime-movie
+              - com.microsoft.windows-media-wmv
+              - public.mpeg-2-transport-stream
+              - org.matroska.mkv
+              - org.webmproject.webm
+              - com.adobe.flash.video
+              - com.real.realmedia-vbr
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.matroska.mkv
+            UTTypeDescription: Matroska 视频
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [mkv]
+          - UTTypeIdentifier: org.webmproject.webm
+            UTTypeDescription: WebM 视频
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [webm]
+          - UTTypeIdentifier: com.adobe.flash.video
+            UTTypeDescription: Flash 视频
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [flv, f4v]
+          - UTTypeIdentifier: com.real.realmedia-vbr
+            UTTypeDescription: RealMedia 视频
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [rmvb, rm]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.linlea.voplayer
+        PRODUCT_NAME: VoPlayer
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        COMBINE_HIDPI_IMAGES: YES
